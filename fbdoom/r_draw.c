@@ -143,7 +143,7 @@ void R_DrawColumn (void)
 
         vuint8m2_t source   =  __riscv_vle8_v_u8m2(dc_source, 128);
 
-        vuint8m4_t colormap =  __riscv_vle8_v_u8m4(dc_colormap, 256);
+        vuint8m8_t colormap =  __riscv_vle8_v_u8m8(dc_colormap, 256);
 
         do
         {
@@ -165,11 +165,11 @@ void R_DrawColumn (void)
 
             vuint8m2_t color_index =  __riscv_vrgather_vv_u8m2(source, source_index, vl);
 
-            vuint8m4_t color_index_4 = __riscv_vlmul_ext_v_u8m2_u8m4 (color_index);
+            vuint8m8_t color_index_8 = __riscv_vlmul_ext_v_u8m2_u8m8 (color_index);
 
-            vuint8m4_t color =  __riscv_vrgather_vv_u8m4(colormap, color_index_4, vl);
+            vuint8m8_t color =  __riscv_vrgather_vv_u8m8(colormap, color_index_8, vl);
 
-            __riscv_vsse8_v_u8m4(dest, SCREENWIDTH, color, vl);
+            __riscv_vsse8_v_u8m8(dest, SCREENWIDTH, color, vl);
 
             dest += vl * SCREENWIDTH;
             frac += vl * fracstep;
@@ -687,28 +687,28 @@ void R_DrawSpan (void)
     count++;
     do
     {
-        size_t vl = __riscv_vsetvl_e32m1(count);
+        size_t vl = __riscv_vsetvl_e32m2(count);
 
-        vuint32m1_t position_base =  __riscv_vmv_v_x_u32m1(position, vl);
+        vuint32m2_t position_base =  __riscv_vmv_v_x_u32m2(position, vl);
 
-        vuint32m1_t indexes =  __riscv_vid_v_u32m1(vl);
+        vuint32m2_t indexes =  __riscv_vid_v_u32m2(vl);
 
-        vuint32m1_t offsets = __riscv_vmul_vx_u32m1(indexes, step, vl);
+        vuint32m2_t offsets = __riscv_vmul_vx_u32m2(indexes, step, vl);
 
-        vuint32m1_t position_v = __riscv_vadd_vv_u32m1(offsets, position_base, vl);
+        vuint32m2_t position_v = __riscv_vadd_vv_u32m2(offsets, position_base, vl);
 
-        vuint32m1_t ytemp = __riscv_vsrl_vx_u32m1(position_v, 4, vl);
-        ytemp = __riscv_vand_vx_u32m1(ytemp, 0x0fc0, vl);
+        vuint32m2_t ytemp = __riscv_vsrl_vx_u32m2(position_v, 4, vl);
+        ytemp = __riscv_vand_vx_u32m2(ytemp, 0x0fc0, vl);
 
-        vuint32m1_t xtemp = __riscv_vsrl_vx_u32m1(position_v, 26, vl);
+        vuint32m2_t xtemp = __riscv_vsrl_vx_u32m2(position_v, 26, vl);
 
-        vuint32m1_t spot = __riscv_vor_vv_u32m1(xtemp, ytemp, vl);
+        vuint32m2_t spot = __riscv_vor_vv_u32m2(xtemp, ytemp, vl);
 
-        vuint8mf4_t source = __riscv_vluxei32_v_u8mf4(ds_source, spot, vl);
+        vuint8mf2_t source = __riscv_vluxei32_v_u8mf2(ds_source, spot, vl);
 
-        vuint8mf4_t colormap = __riscv_vluxei8_v_u8mf4(ds_colormap, source, vl);
+        vuint8mf2_t colormap = __riscv_vluxei8_v_u8mf2(ds_colormap, source, vl);
 
-        __riscv_vse8_v_u8mf4(dest, colormap, vl);
+        __riscv_vse8_v_u8mf2(dest, colormap, vl);
 
         position += step * vl;
         count -= vl;

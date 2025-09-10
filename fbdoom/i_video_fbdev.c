@@ -59,7 +59,6 @@ struct fb_var_screeninfo fb = {};
 int fb_scaling = 1;
 int usemouse = 0;
 
-#ifndef USE_VECTOR
 struct color {
     uint32_t b:8;
     uint32_t g:8;
@@ -67,12 +66,15 @@ struct color {
     uint32_t a:8;
 };
 
+#ifndef USE_VECTOR
 static struct color colors[256];
 #endif
 
-// Vector palette
+// Separate channel arrays for efficient vector access
 #ifdef USE_VECTOR
-static uint16_t vpalette[256];
+static uint8_t red[256];
+static uint8_t green[256];
+static uint8_t blue[256];
 #endif
 
 // The screen buffer; this is modified to draw things to the screen
@@ -180,8 +182,10 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
     x_offset     = (((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8)) / 2;
     x_offset_end = ((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8) - x_offset;
 
-    // Load the palette into the vector register
-    vuint16m8_t palette =  __riscv_vle16_v_u16m8(vpalette, 256);
+    // Load RGB palette using unit stride loads
+    vuint8m8_t r_palette = __riscv_vle8_v_u8m8(red, 256);
+    vuint8m8_t g_palette = __riscv_vle8_v_u8m8(green, 256);
+    vuint8m8_t b_palette = __riscv_vle8_v_u8m8(blue, 256);
 
     while (y--)
     {
@@ -191,20 +195,28 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
 
         while (elements_to_process)
         {
-            size_t vl = __riscv_vsetvl_e8m4(elements_to_process);
+            size_t vl = __riscv_vsetvl_e8m2(elements_to_process);
 
-            vuint8m4_t pixel_index_8 =  __riscv_vle8_v_u8m4(in, vl);
+            vuint8m2_t pixel_index_8 =  __riscv_vle8_v_u8m2(in, vl);
 
-            vuint16m8_t pixel_index_16 = __riscv_vzext_vf2_u16m8(pixel_index_8, vl);
-
-            // Gather the pixel data from the palette
-            vuint16m8_t pixel =  __riscv_vrgather_vv_u16m8(palette, pixel_index_16, vl);
-
-            // Store the pixels into the out buffer
-            __riscv_vse16_v_u16m8((uint16_t*) out, pixel, vl);
+            // Extend indices to m8 for vrgather, then truncate results to m2
+            vuint8m8_t pixel_index_m8 = __riscv_vlmul_ext_v_u8m2_u8m8(pixel_index_8);
+            
+            vuint8m8_t r_m8 = __riscv_vrgather_vv_u8m8(r_palette, pixel_index_m8, vl);
+            vuint8m8_t g_m8 = __riscv_vrgather_vv_u8m8(g_palette, pixel_index_m8, vl);
+            vuint8m8_t b_m8 = __riscv_vrgather_vv_u8m8(b_palette, pixel_index_m8, vl);
+            
+            vuint8m2_t r = __riscv_vlmul_trunc_v_u8m8_u8m2(r_m8);
+            vuint8m2_t g = __riscv_vlmul_trunc_v_u8m8_u8m2(g_m8);
+            vuint8m2_t b = __riscv_vlmul_trunc_v_u8m8_u8m2(b_m8);
+            vuint8m2_t a = __riscv_vmv_v_x_u8m2(0xFF, vl); // Alpha = 0xFF
+            
+            // Create RGBA tuple and store using segment store
+            vuint8m2x4_t rgba_tuple = __riscv_vcreate_v_u8m2x4(b, g, r, a);
+            __riscv_vsseg4e8_v_u8m2x4((uint8_t*)out, rgba_tuple, vl);
 
             in += vl;
-            out += sizeof(uint16_t) * vl;
+            out += 4 * vl; // 4 bytes per pixel for RGBA
             elements_to_process -= vl;
 
         }
@@ -531,47 +543,17 @@ void I_SetPalette (byte* palette)
     //  palette += 3;
     //}
 
-#ifdef USE_VECTOR
-    /* Build palette for vector drawing */
-
-    // vuint8m1_t __riscv_vlse8_v_u8m1(const uint8_t *base, ptrdiff_t bstride, size_t vl);
-    vuint8m4_t vri_8m4 = __riscv_vlse8_v_u8m4(palette    , 3, 256);
-    vuint8m4_t vgi_8m4 = __riscv_vlse8_v_u8m4(palette + 1, 3, 256);
-    vuint8m4_t vbi_8m4 = __riscv_vlse8_v_u8m4(palette + 2, 3, 256);
-
-    // vuint8m4_t __riscv_vluxei8_v_u8m4(const uint8_t *base, vuint8m4_t bindex, size_t vl);
-    vuint8m4_t vr_8m4 = __riscv_vluxei8_v_u8m4(gammatable[usegamma], vri_8m4, 256);
-    vuint8m4_t vg_8m4 = __riscv_vluxei8_v_u8m4(gammatable[usegamma], vgi_8m4, 256);
-    vuint8m4_t vb_8m4 = __riscv_vluxei8_v_u8m4(gammatable[usegamma], vbi_8m4, 256);
-
-    // Downscale pixel resolution based on framebuffer pixel format
-    // vuint8m8_t __riscv_vsrl_vx_u8m8(vuint8m8_t op1, size_t shift, size_t vl);
-    vr_8m4 = __riscv_vsrl_vx_u8m4(vr_8m4, 8 - fb.red.length, 256);
-    vg_8m4 = __riscv_vsrl_vx_u8m4(vg_8m4, 8 - fb.green.length, 256);
-    vb_8m4 = __riscv_vsrl_vx_u8m4(vb_8m4, 8 - fb.blue.length, 256);
-
-    // Construct the pixel (16bits) with vt|vg|vb
-    // vuint16m2_t __riscv_vzext_vf2_u16m2(vuint8m1_t op1, size_t vl);
-    vuint16m8_t vr_16m8 = __riscv_vzext_vf2_u16m8(vr_8m4, 256);
-    vuint16m8_t vg_16m8 = __riscv_vzext_vf2_u16m8(vg_8m4, 256);
-    vuint16m8_t vb_16m8 = __riscv_vzext_vf2_u16m8(vb_8m4, 256);
-
-    vr_16m8 = __riscv_vsll_vx_u16m8(vr_16m8, fb.red.offset, 256);
-    vg_16m8 = __riscv_vsll_vx_u16m8(vg_16m8, fb.green.offset, 256);
-    vb_16m8 = __riscv_vsll_vx_u16m8(vb_16m8, fb.blue.offset, 256);
-
-    vuint16m8_t pixel = __riscv_vor_vv_u16m8(vr_16m8, vg_16m8, 256);
-    pixel = __riscv_vor_vv_u16m8(pixel, vb_16m8, 256);
-
-    // Store the precomputed pixels
-    __riscv_vse16_v_u16m8(vpalette, pixel, 256);
-
-#else
-
     int i;
     /* performance boost:
      * map to the right pixel format over here! */
 
+#ifdef USE_VECTOR
+    for (i=0; i<256; ++i ) {
+        red[i] = gammatable[usegamma][*palette++];
+        green[i] = gammatable[usegamma][*palette++];
+        blue[i] = gammatable[usegamma][*palette++];
+    }
+#else
     for (i=0; i<256; ++i ) {
         colors[i].a = 0;
         colors[i].r = gammatable[usegamma][*palette++];
