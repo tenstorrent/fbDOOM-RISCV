@@ -182,11 +182,6 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
     x_offset     = (((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8)) / 2;
     x_offset_end = ((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8) - x_offset;
 
-    // Load RGB palette using unit stride loads
-    vuint8m8_t r_palette = __riscv_vle8_v_u8m8(red, 256);
-    vuint8m8_t g_palette = __riscv_vle8_v_u8m8(green, 256);
-    vuint8m8_t b_palette = __riscv_vle8_v_u8m8(blue, 256);
-
     while (y--)
     {
         out += x_offset;
@@ -195,25 +190,72 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
 
         while (elements_to_process)
         {
-            size_t vl = __riscv_vsetvl_e8m2(elements_to_process);
+            size_t vl = __riscv_vsetvl_e8m8(elements_to_process);
 
-            vuint8m2_t pixel_index_8 =  __riscv_vle8_v_u8m2(in, vl);
+            // Load pixel indices with m8 to match palette LMUL
+            vuint8m8_t pixel_index_8 =  __riscv_vle8_v_u8m8(in, vl);
 
-            // Extend indices to m8 for vrgather, then truncate results to m2
-            vuint8m8_t pixel_index_m8 = __riscv_vlmul_ext_v_u8m2_u8m8(pixel_index_8);
+            // Use explicit inline assembly to force register reuse
+            vuint8m8_t r_color, g_color, b_color;
             
-            vuint8m8_t r_m8 = __riscv_vrgather_vv_u8m8(r_palette, pixel_index_m8, vl);
-            vuint8m8_t g_m8 = __riscv_vrgather_vv_u8m8(g_palette, pixel_index_m8, vl);
-            vuint8m8_t b_m8 = __riscv_vrgather_vv_u8m8(b_palette, pixel_index_m8, vl);
+            // Load red palette and gather in-place
+            r_color = __riscv_vle8_v_u8m8(red, 256);
+            asm volatile("vrgather.vv %0, %0, %1" : "+&vr"(r_color) : "vr"(pixel_index_8));
             
-            vuint8m2_t r = __riscv_vlmul_trunc_v_u8m8_u8m2(r_m8);
-            vuint8m2_t g = __riscv_vlmul_trunc_v_u8m8_u8m2(g_m8);
-            vuint8m2_t b = __riscv_vlmul_trunc_v_u8m8_u8m2(b_m8);
-            vuint8m2_t a = __riscv_vmv_v_x_u8m2(0xFF, vl); // Alpha = 0xFF
+            // Load green palette and gather in-place
+            g_color = __riscv_vle8_v_u8m8(green, 256);
+            asm volatile("vrgather.vv %0, %0, %1" : "+&vr"(g_color) : "vr"(pixel_index_8));
             
-            // Create RGBA tuple and store using segment store
-            vuint8m2x4_t rgba_tuple = __riscv_vcreate_v_u8m2x4(b, g, r, a);
-            __riscv_vsseg4e8_v_u8m2x4((uint8_t*)out, rgba_tuple, vl);
+            // Load blue palette and gather in-place
+            b_color = __riscv_vle8_v_u8m8(blue, 256);
+            asm volatile("vrgather.vv %0, %0, %1" : "+&vr"(b_color) : "vr"(pixel_index_8));
+            
+            // Use explicit inline assembly with direct register control
+            size_t quarter_vl = vl / 4;
+            
+            // Use a single inline assembly block to control all operations precisely
+            asm volatile(
+                // Set vector length for m2 operations
+                "vsetvli zero, %3, e8, m2, ta, ma\n\t"
+                
+                // Segment 0: Extract B0,G0,R0 and store with alpha
+                "vmv2r.v v0, %0\n\t"      // B0 -> v0,v1 (segment 0 of b_color)
+                "vmv2r.v v2, %1\n\t"      // G0 -> v2,v3 (segment 0 of g_color)  
+                "vmv2r.v v4, %2\n\t"      // R0 -> v4,v5 (segment 0 of r_color)
+                "vmv.v.i v6, -1\n\t"      // A0 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%4)\n\t" // Store BGRA segment 0
+                
+                // Segment 1: Extract B1,G1,R1 and store with alpha
+                "vmv2r.v v0, v26\n\t"     // B1 -> v0,v1 (b_color+2)
+                "vmv2r.v v2, v18\n\t"     // G1 -> v2,v3 (g_color+2)
+                "vmv2r.v v4, v10\n\t"     // R1 -> v4,v5 (r_color+2)
+                "vmv.v.i v6, -1\n\t"      // A1 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%5)\n\t" // Store BGRA segment 1
+                
+                // Segment 2: Extract B2,G2,R2 and store with alpha
+                "vmv2r.v v0, v28\n\t"     // B2 -> v0,v1 (b_color+4)
+                "vmv2r.v v2, v20\n\t"     // G2 -> v2,v3 (g_color+4)
+                "vmv2r.v v4, v12\n\t"     // R2 -> v4,v5 (r_color+4)
+                "vmv.v.i v6, -1\n\t"      // A2 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%6)\n\t" // Store BGRA segment 2
+                
+                // Segment 3: Extract B3,G3,R3 and store with alpha
+                "vmv2r.v v0, v30\n\t"     // B3 -> v0,v1 (b_color+6)
+                "vmv2r.v v2, v22\n\t"     // G3 -> v2,v3 (g_color+6)
+                "vmv2r.v v4, v14\n\t"     // R3 -> v4,v5 (r_color+6)
+                "vmv.v.i v6, -1\n\t"      // A3 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%7)\n\t" // Store BGRA segment 3
+                
+                :: "vr"(b_color),                                 // %0 (v24)
+                   "vr"(g_color),                                 // %1 (v16) 
+                   "vr"(r_color),                                 // %2 (v8)
+                   "r"(quarter_vl),                               // %3
+                   "r"(out),                                      // %4
+                   "r"((uint8_t*)out + quarter_vl * 4),          // %5
+                   "r"((uint8_t*)out + quarter_vl * 8),          // %6
+                   "r"((uint8_t*)out + quarter_vl * 12)          // %7
+                : "memory", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"
+            );
 
             in += vl;
             out += 4 * vl; // 4 bytes per pixel for RGBA
