@@ -195,66 +195,71 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
             // Load pixel indices with m8 to match palette LMUL
             vuint8m8_t pixel_index_8 =  __riscv_vle8_v_u8m8(in, vl);
 
-            // Use explicit inline assembly to force register reuse
-            vuint8m8_t r_color, g_color, b_color;
-            
-            // Load red palette and gather in-place
-            r_color = __riscv_vle8_v_u8m8(red, 256);
-            asm volatile("vrgather.vv %0, %0, %1" : "+&vr"(r_color) : "vr"(pixel_index_8));
-            
-            // Load green palette and gather in-place
-            g_color = __riscv_vle8_v_u8m8(green, 256);
-            asm volatile("vrgather.vv %0, %0, %1" : "+&vr"(g_color) : "vr"(pixel_index_8));
-            
-            // Load blue palette and gather in-place
-            b_color = __riscv_vle8_v_u8m8(blue, 256);
-            asm volatile("vrgather.vv %0, %0, %1" : "+&vr"(b_color) : "vr"(pixel_index_8));
-            
-            // Use explicit inline assembly with direct register control
+            // Optimized approach to minimize register spill with unique destination registers
             size_t quarter_vl = vl / 4;
             
-            // Use a single inline assembly block to control all operations precisely
+            // Allocate stack space for spilling one m8 register group (32 * VLEN/8 bytes)
+            uint8_t spill_buffer[32 * 32]; // Assuming VLEN=256, so 32*32=1024 bytes
+            
             asm volatile(
+                // First vrgather: use v0 to index v24 (blue palette), put results at v16, then spill
+                "vl8r.v v24, (%6)\n\t"           // Load blue palette to v24
+                "vrgather.vv v16, v24, %0\n\t"   // v16 = blue[pixel_index_8]
+                "vs8r.v v16, (%7)\n\t"           // Spill v16 to stack
+                
+                // Second vrgather: load green palette to v24, use vrgather and put results at v16
+                "vl8r.v v24, (%8)\n\t"           // Load green palette to v24
+                "vrgather.vv v16, v24, %0\n\t"   // v16 = green[pixel_index_8]
+                
+                // Third vrgather: load red palette to v24, use vrgather and store at v8
+                "vl8r.v v24, (%9)\n\t"           // Load red palette to v24
+                "vrgather.vv v8, v24, %0\n\t"    // v8 = red[pixel_index_8]
+                
                 // Set vector length for m2 operations
-                "vsetvli zero, %3, e8, m2, ta, ma\n\t"
+                "vsetvli zero, %1, e8, m2, ta, ma\n\t"
+                
+                // Load back spilled blue data
+                "vl8r.v v24, (%7)\n\t"
                 
                 // Segment 0: Extract B0,G0,R0 and store with alpha
-                "vmv2r.v v0, %0\n\t"      // B0 -> v0,v1 (segment 0 of b_color)
-                "vmv2r.v v2, %1\n\t"      // G0 -> v2,v3 (segment 0 of g_color)  
-                "vmv2r.v v4, %2\n\t"      // R0 -> v4,v5 (segment 0 of r_color)
-                "vmv.v.i v6, -1\n\t"      // A0 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%4)\n\t" // Store BGRA segment 0
+                "vmv2r.v v0, v24\n\t"            // B0 -> v0,v1 (segment 0 of b_color)
+                "vmv2r.v v2, v16\n\t"            // G0 -> v2,v3 (segment 0 of g_color)  
+                "vmv2r.v v4, v8\n\t"             // R0 -> v4,v5 (segment 0 of r_color)
+                "vmv.v.i v6, -1\n\t"             // A0 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%2)\n\t"        // Store BGRA segment 0
                 
                 // Segment 1: Extract B1,G1,R1 and store with alpha
-                "vmv2r.v v0, v26\n\t"     // B1 -> v0,v1 (b_color+2)
-                "vmv2r.v v2, v18\n\t"     // G1 -> v2,v3 (g_color+2)
-                "vmv2r.v v4, v10\n\t"     // R1 -> v4,v5 (r_color+2)
-                "vmv.v.i v6, -1\n\t"      // A1 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%5)\n\t" // Store BGRA segment 1
+                "vmv2r.v v0, v26\n\t"            // B1 -> v0,v1 (b_color+2)
+                "vmv2r.v v2, v18\n\t"            // G1 -> v2,v3 (g_color+2)
+                "vmv2r.v v4, v10\n\t"            // R1 -> v4,v5 (r_color+2)
+                "vmv.v.i v6, -1\n\t"             // A1 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%3)\n\t"        // Store BGRA segment 1
                 
                 // Segment 2: Extract B2,G2,R2 and store with alpha
-                "vmv2r.v v0, v28\n\t"     // B2 -> v0,v1 (b_color+4)
-                "vmv2r.v v2, v20\n\t"     // G2 -> v2,v3 (g_color+4)
-                "vmv2r.v v4, v12\n\t"     // R2 -> v4,v5 (r_color+4)
-                "vmv.v.i v6, -1\n\t"      // A2 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%6)\n\t" // Store BGRA segment 2
+                "vmv2r.v v0, v28\n\t"            // B2 -> v0,v1 (b_color+4)
+                "vmv2r.v v2, v20\n\t"            // G2 -> v2,v3 (g_color+4)
+                "vmv2r.v v4, v12\n\t"            // R2 -> v4,v5 (r_color+4)
+                "vmv.v.i v6, -1\n\t"             // A2 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%4)\n\t"        // Store BGRA segment 2
                 
                 // Segment 3: Extract B3,G3,R3 and store with alpha
-                "vmv2r.v v0, v30\n\t"     // B3 -> v0,v1 (b_color+6)
-                "vmv2r.v v2, v22\n\t"     // G3 -> v2,v3 (g_color+6)
-                "vmv2r.v v4, v14\n\t"     // R3 -> v4,v5 (r_color+6)
-                "vmv.v.i v6, -1\n\t"      // A3 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%7)\n\t" // Store BGRA segment 3
+                "vmv2r.v v0, v30\n\t"            // B3 -> v0,v1 (b_color+6)
+                "vmv2r.v v2, v22\n\t"            // G3 -> v2,v3 (g_color+6)
+                "vmv2r.v v4, v14\n\t"            // R3 -> v4,v5 (r_color+6)
+                "vmv.v.i v6, -1\n\t"             // A3 -> v6,v7 (0xFF)
+                "vsseg4e8.v v0, (%5)\n\t"        // Store BGRA segment 3
                 
-                :: "vr"(b_color),                                 // %0 (v24)
-                   "vr"(g_color),                                 // %1 (v16) 
-                   "vr"(r_color),                                 // %2 (v8)
-                   "r"(quarter_vl),                               // %3
-                   "r"(out),                                      // %4
-                   "r"((uint8_t*)out + quarter_vl * 4),          // %5
-                   "r"((uint8_t*)out + quarter_vl * 8),          // %6
-                   "r"((uint8_t*)out + quarter_vl * 12)          // %7
-                : "memory", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7"
+                :: "vr"(pixel_index_8),                           // %0
+                   "r"(quarter_vl),                               // %1
+                   "r"(out),                                      // %2
+                   "r"((uint8_t*)out + quarter_vl * 4),          // %3
+                   "r"((uint8_t*)out + quarter_vl * 8),          // %4
+                   "r"((uint8_t*)out + quarter_vl * 12),         // %5
+                   "r"(blue),                                     // %6 (blue palette address)
+                   "r"(spill_buffer),                            // %7 (spill location)
+                   "r"(green),                                    // %8 (green palette address)
+                   "r"(red)                                       // %9 (red palette address)
+                : "memory"
             );
 
             in += vl;
