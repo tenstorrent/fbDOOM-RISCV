@@ -59,6 +59,7 @@ struct fb_var_screeninfo fb = {};
 int fb_scaling = 1;
 int usemouse = 0;
 
+#ifndef USE_VECTOR
 struct color {
     uint32_t b:8;
     uint32_t g:8;
@@ -66,15 +67,13 @@ struct color {
     uint32_t a:8;
 };
 
-#ifndef USE_VECTOR
 static struct color colors[256];
 #endif
 
-// Separate channel arrays for efficient vector access
+// Vector palette - split into upper and lower 8-bit channels
 #ifdef USE_VECTOR
-static uint8_t red[256];
-static uint8_t green[256];
-static uint8_t blue[256];
+static uint8_t vpalette_upper[256];
+static uint8_t vpalette_lower[256];
 #endif
 
 // The screen buffer; this is modified to draw things to the screen
@@ -182,6 +181,8 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
     x_offset     = (((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8)) / 2;
     x_offset_end = ((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8) - x_offset;
 
+    // Palette loading is done directly in inline assembly
+
     while (y--)
     {
         out += x_offset;
@@ -192,80 +193,49 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
         {
             size_t vl = __riscv_vsetvl_e8m8(elements_to_process);
 
-            // Load pixel indices with m8 to match palette LMUL
-            vuint8m8_t pixel_index_8 =  __riscv_vle8_v_u8m8(in, vl);
+            vuint8m8_t pixel_index = __riscv_vle8_v_u8m8(in, vl);
 
-            // Optimized approach to minimize register spill with unique destination registers
-            size_t quarter_vl = vl / 4;
-            
-            // Allocate stack space for spilling one m8 register group (32 * VLEN/8 bytes)
-            uint8_t spill_buffer[32 * 32]; // Assuming VLEN=256, so 32*32=1024 bytes
+            // Use inline assembly for efficient vrgather and store operations
+            size_t half_vl = vl / 2;
             
             asm volatile(
-                // First vrgather: use v0 to index v24 (blue palette), put results at v16, then spill
-                "vl8r.v v24, (%6)\n\t"           // Load blue palette to v24
-                "vrgather.vv v16, v24, %0\n\t"   // v16 = blue[pixel_index_8]
-                "vs8r.v v16, (%7)\n\t"           // Spill v16 to stack
+                // Set vector length for m8 operations (vrgather)
+                "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
-                // Second vrgather: load green palette to v24, use vrgather and put results at v16
-                "vl8r.v v24, (%8)\n\t"           // Load green palette to v24
-                "vrgather.vv v16, v24, %0\n\t"   // v16 = green[pixel_index_8]
+                // Load upper palette and perform vrgather
+                "vl8r.v v24, (%3)\n\t"           // Load upper palette to v24
+                "vrgather.vv v16, v24, %0\n\t"   // v16 = upper[pixel_index_8]
                 
-                // Third vrgather: load red palette to v24, use vrgather and store at v8
-                "vl8r.v v24, (%9)\n\t"           // Load red palette to v24
-                "vrgather.vv v8, v24, %0\n\t"    // v8 = red[pixel_index_8]
+                // Load lower palette and perform vrgather  
+                "vl8r.v v24, (%4)\n\t"           // Load lower palette to v24
+                "vrgather.vv v8, v24, %0\n\t"    // v8 = lower[pixel_index_8]
                 
-                // Set vector length for m2 operations
-                "vsetvli zero, %1, e8, m2, ta, ma\n\t"
+                // Set vector length for m4 operations (half processing)
+                "vsetvli zero, %2, e8, m4, ta, ma\n\t"
                 
-                // Load back spilled blue data
-                "vl8r.v v24, (%7)\n\t"
+                // First half: Extract upper0,lower0 using vmv4r and store
+                "vmv4r.v v0, v16\n\t"            // upper0 -> v0-v3 (first half)
+                "vmv4r.v v4, v8\n\t"             // lower0 -> v4-v7 (first half)
+                "vsseg2e8.v v4, (%5)\n\t"        // Store lower,upper first half
                 
-                // Segment 0: Extract B0,G0,R0 and store with alpha
-                "vmv2r.v v0, v24\n\t"            // B0 -> v0,v1 (segment 0 of b_color)
-                "vmv2r.v v2, v16\n\t"            // G0 -> v2,v3 (segment 0 of g_color)  
-                "vmv2r.v v4, v8\n\t"             // R0 -> v4,v5 (segment 0 of r_color)
-                "vmv.v.i v6, -1\n\t"             // A0 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%2)\n\t"        // Store BGRA segment 0
+                // Second half: Extract upper1,lower1 using vmv4r and store
+                "vmv4r.v v0, v20\n\t"            // upper1 -> v0-v3 (second half)
+                "vmv4r.v v4, v12\n\t"            // lower1 -> v4-v7 (second half)
+                "vsseg2e8.v v4, (%6)\n\t"        // Store lower,upper second half
                 
-                // Segment 1: Extract B1,G1,R1 and store with alpha
-                "vmv2r.v v0, v26\n\t"            // B1 -> v0,v1 (b_color+2)
-                "vmv2r.v v2, v18\n\t"            // G1 -> v2,v3 (g_color+2)
-                "vmv2r.v v4, v10\n\t"            // R1 -> v4,v5 (r_color+2)
-                "vmv.v.i v6, -1\n\t"             // A1 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%3)\n\t"        // Store BGRA segment 1
-                
-                // Segment 2: Extract B2,G2,R2 and store with alpha
-                "vmv2r.v v0, v28\n\t"            // B2 -> v0,v1 (b_color+4)
-                "vmv2r.v v2, v20\n\t"            // G2 -> v2,v3 (g_color+4)
-                "vmv2r.v v4, v12\n\t"            // R2 -> v4,v5 (r_color+4)
-                "vmv.v.i v6, -1\n\t"             // A2 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%4)\n\t"        // Store BGRA segment 2
-                
-                // Segment 3: Extract B3,G3,R3 and store with alpha
-                "vmv2r.v v0, v30\n\t"            // B3 -> v0,v1 (b_color+6)
-                "vmv2r.v v2, v22\n\t"            // G3 -> v2,v3 (g_color+6)
-                "vmv2r.v v4, v14\n\t"            // R3 -> v4,v5 (r_color+6)
-                "vmv.v.i v6, -1\n\t"             // A3 -> v6,v7 (0xFF)
-                "vsseg4e8.v v0, (%5)\n\t"        // Store BGRA segment 3
-                
-                :: "vr"(pixel_index_8),                           // %0
-                   "r"(quarter_vl),                               // %1
-                   "r"(out),                                      // %2
-                   "r"((uint8_t*)out + quarter_vl * 4),          // %3
-                   "r"((uint8_t*)out + quarter_vl * 8),          // %4
-                   "r"((uint8_t*)out + quarter_vl * 12),         // %5
-                   "r"(blue),                                     // %6 (blue palette address)
-                   "r"(spill_buffer),                            // %7 (spill location)
-                   "r"(green),                                    // %8 (green palette address)
-                   "r"(red)                                       // %9 (red palette address)
+                :: "vr"(pixel_index),                             // %0
+                   "r"(vl),                                       // %1 (full vl for vrgather)
+                   "r"(half_vl),                                  // %2 (half vl for vsseg2e8)
+                   "r"(vpalette_upper),                           // %3 (upper palette address)
+                   "r"(vpalette_lower),                           // %4 (lower palette address)
+                   "r"(out),                                      // %5 (first half output)
+                   "r"((uint8_t*)out + half_vl * 2)              // %6 (second half output)
                 : "memory"
             );
 
             in += vl;
-            out += 4 * vl; // 4 bytes per pixel for RGBA
+            out += sizeof(uint16_t) * vl;
             elements_to_process -= vl;
-
         }
         out += x_offset_end;
     }
@@ -590,17 +560,58 @@ void I_SetPalette (byte* palette)
     //  palette += 3;
     //}
 
+#ifdef USE_VECTOR
+    /* Build palette for vector drawing */
+
+    // Process 256 colors in four batches of 64 for VLEN=256 (LMUL=2)
+    for (int batch = 0; batch < 4; batch++) {
+        byte* palette_offset = palette + batch * 64 * 3;
+        uint8_t* upper_offset = vpalette_upper + batch * 64;
+        uint8_t* lower_offset = vpalette_lower + batch * 64;
+        
+        // Load RGB values using segmented load (more efficient than strided)
+        vuint8m2x3_t rgb_tuple = __riscv_vlseg3e8_v_u8m2x3(palette_offset, 64);
+        vuint8m2_t vri_8m2 = __riscv_vget_v_u8m2x3_u8m2(rgb_tuple, 0);
+        vuint8m2_t vgi_8m2 = __riscv_vget_v_u8m2x3_u8m2(rgb_tuple, 1);
+        vuint8m2_t vbi_8m2 = __riscv_vget_v_u8m2x3_u8m2(rgb_tuple, 2);
+
+        // Apply gamma correction using indexed load
+        vuint8m2_t vr_8m2 = __riscv_vluxei8_v_u8m2(gammatable[usegamma], vri_8m2, 64);
+        vuint8m2_t vg_8m2 = __riscv_vluxei8_v_u8m2(gammatable[usegamma], vgi_8m2, 64);
+        vuint8m2_t vb_8m2 = __riscv_vluxei8_v_u8m2(gammatable[usegamma], vbi_8m2, 64);
+
+        // Downscale pixel resolution based on framebuffer pixel format
+        vr_8m2 = __riscv_vsrl_vx_u8m2(vr_8m2, 8 - fb.red.length, 64);
+        vg_8m2 = __riscv_vsrl_vx_u8m2(vg_8m2, 8 - fb.green.length, 64);
+        vb_8m2 = __riscv_vsrl_vx_u8m2(vb_8m2, 8 - fb.blue.length, 64);
+
+        // Construct the pixel (16bits) with vr|vg|vb
+        vuint16m4_t vr_16m4 = __riscv_vzext_vf2_u16m4(vr_8m2, 64);
+        vuint16m4_t vg_16m4 = __riscv_vzext_vf2_u16m4(vg_8m2, 64);
+        vuint16m4_t vb_16m4 = __riscv_vzext_vf2_u16m4(vb_8m2, 64);
+
+        vr_16m4 = __riscv_vsll_vx_u16m4(vr_16m4, fb.red.offset, 64);
+        vg_16m4 = __riscv_vsll_vx_u16m4(vg_16m4, fb.green.offset, 64);
+        vb_16m4 = __riscv_vsll_vx_u16m4(vb_16m4, fb.blue.offset, 64);
+
+        vuint16m4_t pixel = __riscv_vor_vv_u16m4(vr_16m4, vg_16m4, 64);
+        pixel = __riscv_vor_vv_u16m4(pixel, vb_16m4, 64);
+
+        // Split 16-bit pixels into upper and lower 8-bit channels
+        vuint8m2_t pixel_upper = __riscv_vnsrl_wx_u8m2(pixel, 8, 64);
+        vuint8m2_t pixel_lower = __riscv_vnsrl_wx_u8m2(pixel, 0, 64);
+
+        // Store the precomputed pixels in separate arrays
+        __riscv_vse8_v_u8m2(upper_offset, pixel_upper, 64);
+        __riscv_vse8_v_u8m2(lower_offset, pixel_lower, 64);
+    }
+
+#else
+
     int i;
     /* performance boost:
      * map to the right pixel format over here! */
 
-#ifdef USE_VECTOR
-    for (i=0; i<256; ++i ) {
-        red[i] = gammatable[usegamma][*palette++];
-        green[i] = gammatable[usegamma][*palette++];
-        blue[i] = gammatable[usegamma][*palette++];
-    }
-#else
     for (i=0; i<256; ++i ) {
         colors[i].a = 0;
         colors[i].r = gammatable[usegamma][*palette++];
