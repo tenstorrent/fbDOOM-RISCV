@@ -202,26 +202,29 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
+                // Copy pixel indices to v8 to avoid overlap issues
+                "vmv8r.v v8, %0\n\t"             // Copy pixel_index to v8
+                
                 // Load upper palette and perform vrgather
                 "vl8r.v v24, (%3)\n\t"           // Load upper palette to v24
-                "vrgather.vv v16, v24, %0\n\t"   // v16 = upper[pixel_index_8]
+                "vrgather.vv v16, v24, v8\n\t"   // v16 = upper[pixel_index_8]
                 
                 // Load lower palette and perform vrgather  
                 "vl8r.v v24, (%4)\n\t"           // Load lower palette to v24
-                "vrgather.vv v8, v24, %0\n\t"    // v8 = lower[pixel_index_8]
+                "vrgather.vv v0, v24, v8\n\t"    // v0 = lower[pixel_index_8] (safe, v0 ≠ v8)
                 
                 // Set vector length for m4 operations (half processing)
                 "vsetvli zero, %2, e8, m4, ta, ma\n\t"
                 
                 // First half: Extract upper0,lower0 using vmv4r and store
-                "vmv4r.v v0, v16\n\t"            // upper0 -> v0-v3 (first half)
-                "vmv4r.v v4, v8\n\t"             // lower0 -> v4-v7 (first half)
-                "vsseg2e8.v v4, (%5)\n\t"        // Store lower,upper first half
+                "vmv4r.v v8, v0\n\t"             // lower0 -> v8-v11 (first half)
+                "vmv4r.v v12, v16\n\t"           // upper0 -> v12-v15 (first half)
+                "vsseg2e8.v v8, (%5)\n\t"        // Store lower,upper first half
                 
                 // Second half: Extract upper1,lower1 using vmv4r and store
-                "vmv4r.v v0, v20\n\t"            // upper1 -> v0-v3 (second half)
-                "vmv4r.v v4, v12\n\t"            // lower1 -> v4-v7 (second half)
-                "vsseg2e8.v v4, (%6)\n\t"        // Store lower,upper second half
+                "vmv4r.v v8, v4\n\t"             // lower1 -> v8-v11 (second half, v0+4=v4)
+                "vmv4r.v v12, v20\n\t"           // upper1 -> v12-v15 (second half, v16+4=v20)
+                "vsseg2e8.v v8, (%6)\n\t"        // Store lower,upper second half
                 
                 :: "vr"(pixel_index),                             // %0
                    "r"(vl),                                       // %1 (full vl for vrgather)
