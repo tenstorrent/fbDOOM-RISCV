@@ -141,31 +141,31 @@ void R_DrawColumn (void)
 
         count++;
 
-        vuint8m2_t source   =  __riscv_vle8_v_u8m2(dc_source, 128);
+        vuint8m4_t source   =  __riscv_vle8_v_u8m4(dc_source, 128);
 
         vuint8m8_t colormap =  __riscv_vle8_v_u8m8(dc_colormap, 256);
 
         do
         {
-            size_t vl = __riscv_vsetvl_e32m8(count);
+            size_t vl = __riscv_vsetvl_e32m4(count);
 
-            vuint32m8_t indexes =  __riscv_vid_v_u32m8(vl);
+            vuint32m4_t indexes =  __riscv_vid_v_u32m4(vl);
 
-            vuint32m8_t offsets =  __riscv_vmul_vx_u32m8(indexes, fracstep, vl);
+            vuint32m4_t offsets =  __riscv_vmul_vx_u32m4(indexes, fracstep, vl);
 
-            vuint32m8_t frac_v =  __riscv_vmv_v_x_u32m8(frac, vl);
+            vuint32m4_t frac_v =  __riscv_vmv_v_x_u32m4(frac, vl);
 
-            vuint32m8_t offset_add = __riscv_vadd_vv_u32m8(offsets, frac_v, vl);
+            vuint32m4_t offset_add = __riscv_vadd_vv_u32m4(offsets, frac_v, vl);
 
-            vuint16m4_t offset_shift = __riscv_vnsrl_wx_u16m4(offset_add, FRACBITS, vl);
+            vuint16m2_t offset_shift = __riscv_vnsrl_wx_u16m2(offset_add, FRACBITS, vl);
 
-            vuint8m2_t offsets_shift_8 = __riscv_vnsrl_wx_u8m2(offset_shift, 0, vl);
+            vuint8m1_t offsets_shift_8 = __riscv_vnsrl_wx_u8m1(offset_shift, 0, vl);
 
-            vuint8m2_t source_index = __riscv_vand_vx_u8m2(offsets_shift_8, 127, vl);
+            vuint8m4_t source_index = __riscv_vlmul_ext_v_u8m1_u8m4(__riscv_vand_vx_u8m1(offsets_shift_8, 127, vl));
 
-            vuint8m2_t color_index =  __riscv_vrgather_vv_u8m2(source, source_index, vl);
+            vuint8m4_t color_index =  __riscv_vrgather_vv_u8m4(source, source_index, vl);
 
-            vuint8m8_t color_index_8 = __riscv_vlmul_ext_v_u8m2_u8m8 (color_index);
+            vuint8m8_t color_index_8 = __riscv_vlmul_ext_v_u8m4_u8m8 (color_index);
 
             vuint8m8_t color =  __riscv_vrgather_vv_u8m8(colormap, color_index_8, vl);
 
