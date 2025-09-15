@@ -196,7 +196,7 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
             vuint8m8_t pixel_index = __riscv_vle8_v_u8m8(in, vl);
 
             // Use inline assembly for efficient vrgather and store operations
-            size_t half_vl = vl / 2;
+            // We'll calculate proper vl for each vsseg2e8 using vsetvli
             
             asm volatile(
                 // Set vector length for m8 operations (vrgather)
@@ -206,33 +206,41 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
                 "vmv8r.v v8, %0\n\t"             // Copy pixel_index to v8
                 
                 // Load upper palette and perform vrgather
-                "vl8r.v v24, (%3)\n\t"           // Load upper palette to v24
+                "vl8r.v v24, (%2)\n\t"           // Load upper palette to v24
                 "vrgather.vv v16, v24, v8\n\t"   // v16 = upper[pixel_index_8]
                 
                 // Load lower palette and perform vrgather  
-                "vl8r.v v24, (%4)\n\t"           // Load lower palette to v24
+                "vl8r.v v24, (%3)\n\t"           // Load lower palette to v24
                 "vrgather.vv v0, v24, v8\n\t"    // v0 = lower[pixel_index_8] (safe, v0 ≠ v8)
                 
-                // Set vector length for m4 operations (half processing)
-                "vsetvli zero, %2, e8, m4, ta, ma\n\t"
+                // Calculate first batch VL for m4 operations (vsseg2e8)
+                "vsetvli t0, %1, e8, m4, ta, ma\n\t"     // t0 = actual vl for first vsseg2e8
                 
-                // First half: Extract upper0,lower0 using vmv4r and store
-                "vmv4r.v v8, v0\n\t"             // lower0 -> v8-v11 (first half)
-                "vmv4r.v v12, v16\n\t"           // upper0 -> v12-v15 (first half)
-                "vsseg2e8.v v8, (%5)\n\t"        // Store lower,upper first half
+                // First batch: Extract upper0,lower0 using vmv4r and store
+                "vmv4r.v v8, v0\n\t"             // lower0 -> v8-v11 (first batch)
+                "vmv4r.v v12, v16\n\t"           // upper0 -> v12-v15 (first batch)
+                "vsseg2e8.v v8, (%4)\n\t"        // Store lower,upper first batch
                 
-                // Second half: Extract upper1,lower1 using vmv4r and store
-                "vmv4r.v v8, v4\n\t"             // lower1 -> v8-v11 (second half, v0+4=v4)
-                "vmv4r.v v12, v20\n\t"           // upper1 -> v12-v15 (second half, v16+4=v20)
-                "vsseg2e8.v v8, (%6)\n\t"        // Store lower,upper second half
+                // Calculate remaining elements and second batch VL
+                "sub t1, %1, t0\n\t"             // t1 = remaining elements
+                "beqz t1, 1f\n\t"                // Skip second batch if no remaining elements
+                "vsetvli t1, t1, e8, m4, ta, ma\n\t"     // t1 = actual vl for second vsseg2e8
+                
+                // Calculate second batch output address
+                "slli t2, t0, 1\n\t"             // t2 = first_batch_vl * 2 (bytes per pixel)
+                "add t2, %4, t2\n\t"             // t2 = out + first_batch_vl * 2
+                
+                // Second batch: Extract upper1,lower1 using vmv4r and store
+                "vmv4r.v v8, v4\n\t"             // lower1 -> v8-v11 (second batch, v0+4=v4)
+                "vmv4r.v v12, v20\n\t"           // upper1 -> v12-v15 (second batch, v16+4=v20)
+                "vsseg2e8.v v8, (t2)\n\t"        // Store lower,upper second batch
+                "1:\n\t"                          // End label
                 
                 :: "vr"(pixel_index),                             // %0
                    "r"(vl),                                       // %1 (full vl for vrgather)
-                   "r"(half_vl),                                  // %2 (half vl for vsseg2e8)
-                   "r"(vpalette_upper),                           // %3 (upper palette address)
-                   "r"(vpalette_lower),                           // %4 (lower palette address)
-                   "r"(out),                                      // %5 (first half output)
-                   "r"((uint8_t*)out + half_vl * 2)              // %6 (second half output)
+                   "r"(vpalette_upper),                           // %2 (upper palette address)
+                   "r"(vpalette_lower),                           // %3 (lower palette address)
+                   "r"(out)                                       // %4 (output address)
                 : "memory"
             );
 
@@ -240,6 +248,8 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
             out += sizeof(uint16_t) * vl;
             elements_to_process -= vl;
         }
+        // Advance to next framebuffer line properly
+        // We need to skip to the start of the next line in the framebuffer
         out += x_offset_end;
     }
 }
