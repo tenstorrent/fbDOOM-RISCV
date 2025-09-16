@@ -172,14 +172,27 @@ void cmap_to_fb(uint8_t * out, uint8_t * in, int in_pixels)
     }
 }
 #else
+void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out);
+void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out);
+
 void draw_screen_vector(unsigned char *in, unsigned char *out)
+{
+    if (fb.bits_per_pixel == 16) {
+        draw_screen_vector_rgb565(in, out);
+    } else if (fb.bits_per_pixel == 32) {
+        draw_screen_vector_rgba8888(in, out);
+    }
+}
+
+void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
 {
     int y;
     int x_offset, x_offset_end;
 
     y = SCREENHEIGHT;
-    x_offset     = (((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8)) / 2;
-    x_offset_end = ((fb.xres - (SCREENWIDTH  * fb_scaling)) * fb.bits_per_pixel/8) - x_offset;
+    int temp = ((int)fb.xres - (SCREENWIDTH * fb_scaling)) << 1;
+    x_offset     = temp >> 1;
+    x_offset_end = temp - x_offset;
 
     // Palette loading is done directly in inline assembly
 
@@ -241,7 +254,7 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
                    "r"(vpalette_upper),                           // %2 (upper palette address)
                    "r"(vpalette_lower),                           // %3 (lower palette address)
                    "r"(out)                                       // %4 (output address)
-                : "memory"
+                : "memory", "t0", "t1", "t2"
             );
 
             in += vl;
@@ -250,6 +263,123 @@ void draw_screen_vector(unsigned char *in, unsigned char *out)
         }
         // Advance to next framebuffer line properly
         // We need to skip to the start of the next line in the framebuffer
+        out += x_offset_end;
+    }
+}
+
+void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
+{
+    int y;
+    int x_offset, x_offset_end;
+
+    y = SCREENHEIGHT;
+    int temp = ((int)fb.xres - (SCREENWIDTH * fb_scaling)) << 2;
+    x_offset     = temp >> 1;
+    x_offset_end = temp - x_offset;
+
+    while (y--)
+    {
+        out += x_offset;
+
+        int elements_to_process = SCREENWIDTH;
+
+        while (elements_to_process)
+        {
+            size_t vl = __riscv_vsetvl_e8m8(elements_to_process);
+
+            vuint8m8_t pixel_index = __riscv_vle8_v_u8m8(in, vl);
+
+            asm volatile(
+                // Set vector length for m8 operations (vrgather)
+                "vsetvli zero, %1, e8, m8, ta, ma\n\t"
+                
+                // Copy pixel indices to v8 to avoid overlap issues
+                "vmv8r.v v8, %0\n\t"             // Copy pixel_index to v8
+                
+                // Load upper palette and perform vrgather
+                "vl8r.v v24, (%2)\n\t"           // Load upper palette to v24
+                "vrgather.vv v16, v24, v8\n\t"   // v16 = upper[pixel_index_8] = {B[4:0], G[5:3]}
+                
+                // Load lower palette and perform vrgather  
+                "vl8r.v v24, (%3)\n\t"           // Load lower palette to v24
+                "vrgather.vv v0, v24, v8\n\t"    // v0 = lower[pixel_index_8] = {G[2:0], R[4:0]}
+                
+                // Now we have:
+                // v16 = upper = {B[4:0], G[5:3]} - B in bits [7:3], G[5:3] in bits [2:0]
+                // v0  = lower = {G[2:0], R[4:0]} - G[2:0] in bits [7:5], R in bits [4:0]
+                
+                // Extract Red channel (use v8 as destination)
+                "vsll.vi v8, v0, 3\n\t"          // v8 = red_8bit (R channel, lower 5 bits shifted)
+                
+                // Extract Green channel components (use v24 as temp)
+                "vsll.vi v24, v16, 5\n\t"        // v24 = G[5:3] from upper << 5 (to bits [7:5])
+                "vsrl.vi v0, v0, 3\n\t"          // v0 = G[2:0] from lower >> 3 (to bits [4:2])
+                "vor.vv v0, v24, v0\n\t"         // v0 = G[5:0] combined
+                
+                // Extract Blue channel (overwrite v16)
+                "vand.vi v16, v16, -8\n\t"       // v16 = clear lower 3 bits (keep B[4:0] in upper 5 bits)
+                
+                // Now we have: v8=R, v0=G, v16=B
+                
+                // Initialize tracking registers
+                "mv t1, %1\n\t"                  // t1 = remaining elements
+                "mv t2, %4\n\t"                  // t2 = current output pointer
+                
+                // Batch 1
+                "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for first vsseg4e8
+                "vmv2r.v v24, v16\n\t"           // B0 -> v24-v25 (batch 1)
+                "vmv2r.v v26, v0\n\t"            // G0 -> v26-v27 (batch 1)
+                "vmv2r.v v28, v8\n\t"            // R0 -> v28-v29 (batch 1)
+                "vmv.v.i v30, 0\n\t"             // v30 = alpha = 0 (needs LMUL=2)
+                "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 1
+                "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 1
+                "slli t3, t0, 2\n\t"             // t3 = batch1_vl * 4 (bytes per pixel)
+                "add t2, t2, t3\n\t"             // t2 = update output pointer
+                "beqz t1, 4f\n\t"                // Skip remaining batches if no remaining elements
+                
+                // Batch 2
+                "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for second vsseg4e8
+                "vmv2r.v v24, v18\n\t"           // B1 -> v24-v25 (batch 2, v16+2=v18)
+                "vmv2r.v v26, v2\n\t"            // G1 -> v26-v27 (batch 2, v0+2=v2)
+                "vmv2r.v v28, v10\n\t"           // R1 -> v28-v29 (batch 2, v8+2=v10)
+                "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 2
+                "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 2
+                "slli t3, t0, 2\n\t"             // t3 = batch2_vl * 4 (bytes per pixel)
+                "add t2, t2, t3\n\t"             // t2 = update output pointer
+                "beqz t1, 4f\n\t"                // Skip remaining batches if no remaining elements
+                
+                // Batch 3
+                "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for third vsseg4e8
+                "vmv2r.v v24, v20\n\t"           // B2 -> v24-v25 (batch 3, v16+4=v20)
+                "vmv2r.v v26, v4\n\t"            // G2 -> v26-v27 (batch 3, v0+4=v4)
+                "vmv2r.v v28, v12\n\t"           // R2 -> v28-v29 (batch 3, v8+4=v12)
+                "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 3
+                "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 3
+                "slli t3, t0, 2\n\t"             // t3 = batch3_vl * 4 (bytes per pixel)
+                "add t2, t2, t3\n\t"             // t2 = update output pointer
+                "beqz t1, 4f\n\t"                // Skip last batch if no remaining elements
+                
+                // Batch 4
+                "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for fourth vsseg4e8
+                "vmv2r.v v24, v22\n\t"           // B3 -> v24-v25 (batch 4, v16+6=v22)
+                "vmv2r.v v26, v6\n\t"            // G3 -> v26-v27 (batch 4, v0+6=v6)
+                "vmv2r.v v28, v14\n\t"           // R3 -> v28-v29 (batch 4, v8+6=v14)
+                "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 4
+                
+                "4:\n\t"                          // End label
+                
+                :: "vr"(pixel_index),                             // %0
+                   "r"(vl),                                       // %1 (full vl for vrgather)
+                   "r"(vpalette_upper),                           // %2 (upper palette address)
+                   "r"(vpalette_lower),                           // %3 (lower palette address)
+                   "r"(out)                                       // %4 (output address)
+                : "memory", "t0", "t1", "t2", "t3", "t4", "t5", "t6"
+            );
+
+            in += vl;
+            out += sizeof(uint32_t) * vl;
+            elements_to_process -= vl;
+        }
         out += x_offset_end;
     }
 }
@@ -594,18 +724,18 @@ void I_SetPalette (byte* palette)
         vuint8m2_t vb_8m2 = __riscv_vluxei8_v_u8m2(gammatable[usegamma], vbi_8m2, 64);
 
         // Downscale pixel resolution based on framebuffer pixel format
-        vr_8m2 = __riscv_vsrl_vx_u8m2(vr_8m2, 8 - fb.red.length, 64);
-        vg_8m2 = __riscv_vsrl_vx_u8m2(vg_8m2, 8 - fb.green.length, 64);
-        vb_8m2 = __riscv_vsrl_vx_u8m2(vb_8m2, 8 - fb.blue.length, 64);
+        vr_8m2 = __riscv_vsrl_vx_u8m2(vr_8m2, 8 - 5, 64);
+        vg_8m2 = __riscv_vsrl_vx_u8m2(vg_8m2, 8 - 6, 64);
+        vb_8m2 = __riscv_vsrl_vx_u8m2(vb_8m2, 8 - 5, 64);
 
         // Construct the pixel (16bits) with vr|vg|vb
         vuint16m4_t vr_16m4 = __riscv_vzext_vf2_u16m4(vr_8m2, 64);
         vuint16m4_t vg_16m4 = __riscv_vzext_vf2_u16m4(vg_8m2, 64);
         vuint16m4_t vb_16m4 = __riscv_vzext_vf2_u16m4(vb_8m2, 64);
 
-        vr_16m4 = __riscv_vsll_vx_u16m4(vr_16m4, fb.red.offset, 64);
-        vg_16m4 = __riscv_vsll_vx_u16m4(vg_16m4, fb.green.offset, 64);
-        vb_16m4 = __riscv_vsll_vx_u16m4(vb_16m4, fb.blue.offset, 64);
+        vr_16m4 = __riscv_vsll_vx_u16m4(vr_16m4, 0, 64);
+        vg_16m4 = __riscv_vsll_vx_u16m4(vg_16m4, 5, 64);
+        vb_16m4 = __riscv_vsll_vx_u16m4(vb_16m4, 11, 64);
 
         vuint16m4_t pixel = __riscv_vor_vv_u16m4(vr_16m4, vg_16m4, 64);
         pixel = __riscv_vor_vv_u16m4(pixel, vb_16m4, 64);
