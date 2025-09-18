@@ -264,7 +264,9 @@ void kbd_shutdown(void)
 
     printf("Exiting normally.\n");
     if (old_mode != -1) {
+#if 0
         ioctl(kb, KDSKBMODE, old_mode);
+#endif
         tcsetattr(kb, 0, &old_term);
     }
 
@@ -287,6 +289,7 @@ static int kbd_init(void)
        stdin, stdout, or stderr. We'll try them in that order.
        If none are acceptable, we're probably not being run
        from a VT. */
+#if 0
     for (i = 0; files_to_try[i] != NULL; i++) {
         /* Try to open the file. */
         kb = open(files_to_try[i], O_RDONLY);
@@ -311,6 +314,10 @@ static int kbd_init(void)
             }
         }
     }
+#else
+    found = 1;
+    kb = 0;
+#endif
 
     if (!found) {
         printf("Unable to find a file descriptor associated with "\
@@ -319,11 +326,13 @@ static int kbd_init(void)
         return 1;
     }
 
+#if 0
     /* Find the keyboard's mode so we can restore it later. */
     if (ioctl(kb, KDGKBMODE, &old_mode) != 0) {
         printf("Unable to query keyboard mode.\n");
         kbd_shutdown();
     }
+#endif
 
     /* Adjust the terminal's settings. In particular, disable
        echoing, signal generation, and line buffering. Any of
@@ -343,11 +352,13 @@ static int kbd_init(void)
         printf("Unable to change terminal settings.\n");
     }
     
+#if 0
     /* Put the keyboard in mediumraw mode. */
     if (ioctl(kb, KDSKBMODE, K_MEDIUMRAW) != 0) {
         printf("Unable to set mediumraw mode.\n");
         kbd_shutdown();
     }
+#endif
 
     /* Put in non-blocking mode */
     flags = fcntl(kb, F_GETFL, 0);
@@ -436,7 +447,7 @@ void I_GetEvent(void)
     
     while (kbd_read(&pressed, &key))
     {
-        if (key == 0x0E) {
+        if (key == 0x0E || key == 'q' || key == 'Q') {
             kbd_shutdown();
             I_Quit();
         }
