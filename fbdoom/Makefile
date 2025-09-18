@@ -5,7 +5,7 @@
 # $Log:$
 #
 
-CROSS_COMPILE=/tools_risc/opensrc/riscv-toolchain-5-23-25/linux/bin/riscv64-unknown-linux-gnu-
+CROSS_COMPILE=/opt/tenstorrent/tt-riscv-toolchain-latest/bin/riscv64-unknown-linux-gnu-
 NOSDL=1
 
 ifeq ($(V),1)
@@ -24,7 +24,7 @@ OBJS_VEC+=$(OBJDIR_VEC)/i_video_fbdev.o
 OBJS_VEC+=$(OBJDIR_VEC)/i_input_tty.o
 
 CC=$(CROSS_COMPILE)gcc  # gcc or g++
-CFLAGS+=-ggdb3 -O3 -g -march=rv64gcv -std=gnu99
+CFLAGS+=-ggdb3 -O3 -g -mcpu=tt-ascalon-d8 -std=c11 -D_XOPEN_SOURCE=500
 LDFLAGS+=-Wl,--gc-sections
 CFLAGS+=-ggdb3 -Wall -DNORMALUNIX -DLINUX -DSNDSERV # -DUSEASM
 LIBS+=-lm -lc
