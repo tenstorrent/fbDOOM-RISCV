@@ -211,7 +211,7 @@ void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
             // Use inline assembly for efficient vrgather and store operations
             // We'll calculate proper vl for each vsseg2e8 using vsetvli
             
-            asm volatile(
+            __asm__ volatile(
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
@@ -289,7 +289,7 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
 
             vuint8m8_t pixel_index = __riscv_vle8_v_u8m8(in, vl);
 
-            asm volatile(
+            __asm__ volatile(
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
