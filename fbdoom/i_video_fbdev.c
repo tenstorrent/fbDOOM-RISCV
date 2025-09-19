@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <time.h>
 #include <stdarg.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -627,6 +628,9 @@ void I_UpdateNoBlit (void)
 // I_FinishUpdate
 //
 
+static unsigned long ns_start;
+static unsigned long frames;
+
 void I_FinishUpdate (void)
 {
 #ifdef USE_VECTOR
@@ -670,7 +674,20 @@ void I_FinishUpdate (void)
         line_in += SCREENWIDTH;
     }
 #endif
+    frames++;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long ns = ts.tv_sec * 1000000000 + ts.tv_nsec;
+
+#define SCALING_FACTOR 250
+    double seconds = (double)(ns-ns_start) / 1000000000.0 * SCALING_FACTOR;
+    if (seconds >= 1.0) {
+        printf("%2.f FPS\n", 1.0 * frames/seconds);
+        ns_start = ns;
+        frames = 0;
+    }
 }
+
 
 //
 // I_ReadScreen
