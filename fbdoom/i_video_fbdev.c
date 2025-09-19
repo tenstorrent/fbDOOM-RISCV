@@ -687,7 +687,7 @@ void I_FinishUpdate (void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     unsigned long ns = ts.tv_sec * 1000000000 + ts.tv_nsec;
 
-#define SCALING_FACTOR 250
+#define SCALING_FACTOR 167
     double seconds = (double)(ns-ns_start) / 1000000000.0 * SCALING_FACTOR;
     if (seconds >= 1.0) {
         printf("%2.f FPS\n", 1.0 * frames/seconds);
