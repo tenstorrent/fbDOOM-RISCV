@@ -5,7 +5,7 @@
 # $Log:$
 #
 
-CROSS_COMPILE=/tools_risc/opensrc/riscv-toolchain-5-23-25/linux/bin/riscv64-unknown-linux-gnu-
+CROSS_COMPILE=riscv64-unknown-linux-gnu-
 NOSDL=1
 
 ifeq ($(V),1)
