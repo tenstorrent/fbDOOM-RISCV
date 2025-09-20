@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <time.h>
 #include <stdarg.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -211,7 +212,7 @@ void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
             // Use inline assembly for efficient vrgather and store operations
             // We'll calculate proper vl for each vsseg2e8 using vsetvli
             
-            asm volatile(
+            __asm__ volatile(
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
@@ -254,7 +255,11 @@ void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
                    "r"(vpalette_upper),                           // %2 (upper palette address)
                    "r"(vpalette_lower),                           // %3 (lower palette address)
                    "r"(out)                                       // %4 (output address)
-                : "memory", "t0", "t1", "t2"
+                : "t0", "t1", "t2",
+                  "v8", "v9",
+                  "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19",
+                  "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29",
+                  "v30", "v31", "vl", "vtype", "vxrm", "vxsat", "memory"
             );
 
             in += vl;
@@ -289,7 +294,7 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
 
             vuint8m8_t pixel_index = __riscv_vle8_v_u8m8(in, vl);
 
-            asm volatile(
+            __asm__ volatile(
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
@@ -373,7 +378,11 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                    "r"(vpalette_upper),                           // %2 (upper palette address)
                    "r"(vpalette_lower),                           // %3 (lower palette address)
                    "r"(out)                                       // %4 (output address)
-                : "memory", "t0", "t1", "t2", "t3", "t4", "t5", "t6"
+                : "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+                  "v8", "v9",
+                  "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19",
+                  "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29",
+                  "v30", "v31", "vl", "vtype", "vxrm", "vxsat", "memory"
             );
 
             in += vl;
@@ -627,6 +636,9 @@ void I_UpdateNoBlit (void)
 // I_FinishUpdate
 //
 
+static unsigned long ns_start;
+static unsigned long frames;
+
 void I_FinishUpdate (void)
 {
 #ifdef USE_VECTOR
@@ -670,7 +682,20 @@ void I_FinishUpdate (void)
         line_in += SCREENWIDTH;
     }
 #endif
+    frames++;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long ns = ts.tv_sec * 1000000000 + ts.tv_nsec;
+
+#define SCALING_FACTOR 167
+    double seconds = (double)(ns-ns_start) / 1000000000.0 * SCALING_FACTOR;
+    if (seconds >= 1.0) {
+        printf("%2.f FPS\n", 1.0 * frames/seconds);
+        ns_start = ns;
+        frames = 0;
+    }
 }
+
 
 //
 // I_ReadScreen

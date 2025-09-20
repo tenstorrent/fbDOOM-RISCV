@@ -30,13 +30,18 @@
 
 static uint32_t basetime = 0;
 
+// Adjust for simulator
+#define SCALING_FACTOR 167
+
 int I_GetTicks(void)
 {
     struct timeval  tp;
-    struct timezone tzp;
   
-    gettimeofday(&tp, &tzp);
-    return (tp.tv_sec * 1000) + (tp.tv_usec / 1000); /* return milliseconds */
+    gettimeofday(&tp, NULL);
+
+    unsigned long usecs = tp.tv_sec * 1000000UL + tp.tv_usec;
+
+    return (usecs * SCALING_FACTOR) / 1000; /* return scaled milliseconds */
 }
 
 int  I_GetTime (void)
