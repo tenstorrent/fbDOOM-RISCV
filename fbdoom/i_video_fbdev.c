@@ -211,7 +211,7 @@ void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
             // Use inline assembly for efficient vrgather and store operations
             // We'll calculate proper vl for each vsseg2e8 using vsetvli
             
-            asm volatile(
+            __asm__ volatile(
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
@@ -254,7 +254,11 @@ void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
                    "r"(vpalette_upper),                           // %2 (upper palette address)
                    "r"(vpalette_lower),                           // %3 (lower palette address)
                    "r"(out)                                       // %4 (output address)
-                : "memory", "t0", "t1", "t2"
+                : "t0", "t1", "t2",
+                  "v8", "v9",
+                  "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19",
+                  "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29",
+                  "v30", "v31", "vl", "vtype", "vxrm", "vxsat", "memory"
             );
 
             in += vl;
@@ -289,7 +293,7 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
 
             vuint8m8_t pixel_index = __riscv_vle8_v_u8m8(in, vl);
 
-            asm volatile(
+            __asm__ volatile(
                 // Set vector length for m8 operations (vrgather)
                 "vsetvli zero, %1, e8, m8, ta, ma\n\t"
                 
@@ -327,9 +331,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 1
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for first vsseg4e8
-                "vmv2r.v v24, v16\n\t"           // B0 -> v24-v25 (batch 1)
+                "vmv2r.v v24, v8\n\t"            // R0 -> v24-v25 (batch 1)
                 "vmv2r.v v26, v0\n\t"            // G0 -> v26-v27 (batch 1)
-                "vmv2r.v v28, v8\n\t"            // R0 -> v28-v29 (batch 1)
+                "vmv2r.v v28, v16\n\t"           // B0 -> v28-v29 (batch 1)
                 "vmv.v.i v30, 0\n\t"             // v30 = alpha = 0 (needs LMUL=2)
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 1
                 "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 1
@@ -339,9 +343,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 2
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for second vsseg4e8
-                "vmv2r.v v24, v18\n\t"           // B1 -> v24-v25 (batch 2, v16+2=v18)
+                "vmv2r.v v24, v10\n\t"           // R1 -> v24-v25 (batch 2, v16+2=v18)
                 "vmv2r.v v26, v2\n\t"            // G1 -> v26-v27 (batch 2, v0+2=v2)
-                "vmv2r.v v28, v10\n\t"           // R1 -> v28-v29 (batch 2, v8+2=v10)
+                "vmv2r.v v28, v18\n\t"           // B1 -> v28-v29 (batch 2, v8+2=v10)
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 2
                 "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 2
                 "slli t3, t0, 2\n\t"             // t3 = batch2_vl * 4 (bytes per pixel)
@@ -350,9 +354,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 3
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for third vsseg4e8
-                "vmv2r.v v24, v20\n\t"           // B2 -> v24-v25 (batch 3, v16+4=v20)
+                "vmv2r.v v24, v12\n\t"           // R2 -> v24-v25 (batch 3, v16+4=v20)
                 "vmv2r.v v26, v4\n\t"            // G2 -> v26-v27 (batch 3, v0+4=v4)
-                "vmv2r.v v28, v12\n\t"           // R2 -> v28-v29 (batch 3, v8+4=v12)
+                "vmv2r.v v28, v20\n\t"           // B2 -> v28-v29 (batch 3, v8+4=v12)
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 3
                 "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 3
                 "slli t3, t0, 2\n\t"             // t3 = batch3_vl * 4 (bytes per pixel)
@@ -361,9 +365,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 4
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for fourth vsseg4e8
-                "vmv2r.v v24, v22\n\t"           // B3 -> v24-v25 (batch 4, v16+6=v22)
+                "vmv2r.v v24, v14\n\t"           // R3 -> v24-v25 (batch 4, v16+6=v22)
                 "vmv2r.v v26, v6\n\t"            // G3 -> v26-v27 (batch 4, v0+6=v6)
-                "vmv2r.v v28, v14\n\t"           // R3 -> v28-v29 (batch 4, v8+6=v14)
+                "vmv2r.v v28, v22\n\t"           // B3 -> v28-v29 (batch 4, v8+6=v14)
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 4
                 
                 "4:\n\t"                          // End label
@@ -373,7 +377,11 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                    "r"(vpalette_upper),                           // %2 (upper palette address)
                    "r"(vpalette_lower),                           // %3 (lower palette address)
                    "r"(out)                                       // %4 (output address)
-                : "memory", "t0", "t1", "t2", "t3", "t4", "t5", "t6"
+                : "t0", "t1", "t2", "t3", "t4", "t5", "t6",
+                  "v8", "v9",
+                  "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19",
+                  "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29",
+                  "v30", "v31", "vl", "vtype", "vxrm", "vxsat", "memory"
             );
 
             in += vl;

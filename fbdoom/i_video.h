@@ -137,6 +137,8 @@ void I_StartTic (void);
 
 void I_EnableLoadingDisk(void);
 
+extern void I_EndRead(void);
+
 extern char *video_driver;
 extern boolean screenvisible;
 
