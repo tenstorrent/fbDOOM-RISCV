@@ -27,7 +27,7 @@ CC=$(CROSS_COMPILE)gcc  # gcc or g++
 CFLAGS+=-ggdb3 -O3 -g -mcpu=tt-ascalon-d8 -std=c11 -D_XOPEN_SOURCE=500
 LDFLAGS+=-Wl,--gc-sections
 CFLAGS+=-ggdb3 -Wall -DNORMALUNIX -DLINUX -DSNDSERV # -DUSEASM
-LIBS+=-lm -lc
+LIBS+=-lm -lc -static
 
 ifneq ($(NOSDL),1)
 	LIBS+= -lSDL
