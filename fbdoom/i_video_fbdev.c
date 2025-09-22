@@ -81,6 +81,11 @@ static uint8_t vpalette_lower[256];
 byte *I_VideoBuffer = NULL;
 byte *I_VideoBuffer_FB = NULL;
 
+#ifdef USE_VECTOR
+// Intermediate buffer for vector scaling - fixed 320x200 size
+byte *I_VideoBuffer_Intermediate = NULL;
+#endif
+
 /* framebuffer file descriptor */
 int fd_fb = 0;
 
@@ -190,9 +195,17 @@ void draw_screen_vector_rgb565(unsigned char *in, unsigned char *out)
     int x_offset, x_offset_end;
 
     y = SCREENHEIGHT;
-    int temp = ((int)fb.xres - (SCREENWIDTH * fb_scaling)) << 1;
-    x_offset     = temp >> 1;
-    x_offset_end = temp - x_offset;
+    
+    if (fb_scaling == 1) {
+        // Direct to framebuffer - use proper centering
+        int temp = ((int)fb.xres - (SCREENWIDTH * fb_scaling)) << 1;
+        x_offset     = temp >> 1;
+        x_offset_end = temp - x_offset;
+    } else {
+        // To intermediate buffer - no offsets needed (320x200 fixed size)
+        x_offset = 0;
+        x_offset_end = 0;
+    }
 
     // Palette loading is done directly in inline assembly
 
@@ -277,9 +290,17 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
     int x_offset, x_offset_end;
 
     y = SCREENHEIGHT;
-    int temp = ((int)fb.xres - (SCREENWIDTH * fb_scaling)) << 2;
-    x_offset     = temp >> 1;
-    x_offset_end = temp - x_offset;
+    
+    if (fb_scaling == 1) {
+        // Direct to framebuffer - use proper centering
+        int temp = ((int)fb.xres - (SCREENWIDTH * fb_scaling)) << 2;
+        x_offset     = temp >> 1;
+        x_offset_end = temp - x_offset;
+    } else {
+        // To intermediate buffer - no offsets needed (320x200 fixed size)
+        x_offset = 0;
+        x_offset_end = 0;
+    }
 
     while (y--)
     {
@@ -331,9 +352,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 1
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for first vsseg4e8
-                "vmv2r.v v24, v8\n\t"            // R0 -> v24-v25 (batch 1)
+                "vmv2r.v v24, v16\n\t"           // B0 -> v24-v25 (batch 1) - swapped with R
                 "vmv2r.v v26, v0\n\t"            // G0 -> v26-v27 (batch 1)
-                "vmv2r.v v28, v16\n\t"           // B0 -> v28-v29 (batch 1)
+                "vmv2r.v v28, v8\n\t"            // R0 -> v28-v29 (batch 1) - swapped with B
                 "vmv.v.i v30, 0\n\t"             // v30 = alpha = 0 (needs LMUL=2)
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 1
                 "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 1
@@ -343,9 +364,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 2
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for second vsseg4e8
-                "vmv2r.v v24, v10\n\t"           // R1 -> v24-v25 (batch 2, v16+2=v18)
+                "vmv2r.v v24, v18\n\t"           // B1 -> v24-v25 (batch 2, v16+2=v18) - swapped with R
                 "vmv2r.v v26, v2\n\t"            // G1 -> v26-v27 (batch 2, v0+2=v2)
-                "vmv2r.v v28, v18\n\t"           // B1 -> v28-v29 (batch 2, v8+2=v10)
+                "vmv2r.v v28, v10\n\t"           // R1 -> v28-v29 (batch 2, v8+2=v10) - swapped with B
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 2
                 "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 2
                 "slli t3, t0, 2\n\t"             // t3 = batch2_vl * 4 (bytes per pixel)
@@ -354,9 +375,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 3
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for third vsseg4e8
-                "vmv2r.v v24, v12\n\t"           // R2 -> v24-v25 (batch 3, v16+4=v20)
+                "vmv2r.v v24, v20\n\t"           // B2 -> v24-v25 (batch 3, v16+4=v20) - swapped with R
                 "vmv2r.v v26, v4\n\t"            // G2 -> v26-v27 (batch 3, v0+4=v4)
-                "vmv2r.v v28, v20\n\t"           // B2 -> v28-v29 (batch 3, v8+4=v12)
+                "vmv2r.v v28, v12\n\t"           // R2 -> v28-v29 (batch 3, v8+4=v12) - swapped with B
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 3
                 "sub t1, t1, t0\n\t"             // t1 = remaining elements after batch 3
                 "slli t3, t0, 2\n\t"             // t3 = batch3_vl * 4 (bytes per pixel)
@@ -365,9 +386,9 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
                 
                 // Batch 4
                 "vsetvli t0, t1, e8, m2, ta, ma\n\t"     // t0 = actual vl for fourth vsseg4e8
-                "vmv2r.v v24, v14\n\t"           // R3 -> v24-v25 (batch 4, v16+6=v22)
+                "vmv2r.v v24, v22\n\t"           // B3 -> v24-v25 (batch 4, v16+6=v22) - swapped with R
                 "vmv2r.v v26, v6\n\t"            // G3 -> v26-v27 (batch 4, v0+6=v6)
-                "vmv2r.v v28, v22\n\t"           // B3 -> v28-v29 (batch 4, v8+6=v14)
+                "vmv2r.v v28, v14\n\t"           // R3 -> v28-v29 (batch 4, v8+6=v14) - swapped with B
                 "vsseg4e8.v v24, (t2)\n\t"       // Store BGRA batch 4
                 
                 "4:\n\t"                          // End label
@@ -389,6 +410,139 @@ void draw_screen_vector_rgba8888(unsigned char *in, unsigned char *out)
             elements_to_process -= vl;
         }
         out += x_offset_end;
+    }
+}
+
+void scale_intermediate_to_framebuffer_rgb565(unsigned char *intermediate, unsigned char *framebuffer, int scale_factor)
+{
+    int y;
+    int fb_width = fb.xres;
+    int fb_height = fb.yres;
+    
+    // Calculate offsets - center X, align to top for Y (like original fbdoom)
+    int x_offset = (fb_width - (SCREENWIDTH * scale_factor)) / 2;
+    int y_offset = 0;
+    
+    for (y = 0; y < SCREENHEIGHT; y++) {
+        unsigned char *src_line = intermediate + y * SCREENWIDTH * 2; // 2 bytes per pixel for RGB565
+        
+        for (int scale_y = 0; scale_y < scale_factor; scale_y++) {
+            int dst_y = y_offset + y * scale_factor + scale_y;
+            if (dst_y >= fb_height) break;
+            
+            unsigned char *dst_line = framebuffer + dst_y * fb_width * 2 + x_offset * 2;
+            
+            int elements_to_process = SCREENWIDTH;
+            unsigned char *src_ptr = src_line;
+            unsigned char *dst_ptr = dst_line;
+            
+            while (elements_to_process > 0) {
+                size_t vl = __riscv_vsetvl_e16m1(elements_to_process);
+                
+                // Load pixels from intermediate buffer
+                vuint16m1_t pixels = __riscv_vle16_v_u16m1((uint16_t*)src_ptr, vl);
+                
+                // Use vsseg[2-8]e16 to store duplicated pixels
+                switch (scale_factor) {
+                    case 2:
+                        __riscv_vsseg2e16_v_u16m1x2((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x2(pixels, pixels), vl);
+                        break;
+                    case 3:
+                        __riscv_vsseg3e16_v_u16m1x3((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x3(pixels, pixels, pixels), vl);
+                        break;
+                    case 4:
+                        __riscv_vsseg4e16_v_u16m1x4((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x4(pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 5:
+                        __riscv_vsseg5e16_v_u16m1x5((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x5(pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 6:
+                        __riscv_vsseg6e16_v_u16m1x6((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x6(pixels, pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 7:
+                        __riscv_vsseg7e16_v_u16m1x7((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x7(pixels, pixels, pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 8:
+                        __riscv_vsseg8e16_v_u16m1x8((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x8(pixels, pixels, pixels, pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                }
+                
+                src_ptr += vl * 2;
+                dst_ptr += vl * scale_factor * 2;
+                elements_to_process -= vl;
+            }
+        }
+    }
+}
+
+void scale_intermediate_to_framebuffer_rgba8888(unsigned char *intermediate, unsigned char *framebuffer, int scale_factor)
+{
+    int y;
+    int fb_width = fb.xres;
+    int fb_height = fb.yres;
+    
+    // Calculate offsets - center X, align to top for Y (like original fbdoom)
+    int x_offset = (fb_width - (SCREENWIDTH * scale_factor)) / 2;
+    int y_offset = 0;
+    
+    for (y = 0; y < SCREENHEIGHT; y++) {
+        unsigned char *src_line = intermediate + y * SCREENWIDTH * 4; // 4 bytes per pixel for RGBA8888
+        
+        for (int scale_y = 0; scale_y < scale_factor; scale_y++) {
+            int dst_y = y_offset + y * scale_factor + scale_y;
+            if (dst_y >= fb_height) break;
+            
+            unsigned char *dst_line = framebuffer + dst_y * fb_width * 4 + x_offset * 4;
+            
+            int elements_to_process = SCREENWIDTH;
+            unsigned char *src_ptr = src_line;
+            unsigned char *dst_ptr = dst_line;
+            
+            while (elements_to_process > 0) {
+                size_t vl = __riscv_vsetvl_e32m1(elements_to_process);
+                
+                // Load pixels from intermediate buffer
+                vuint32m1_t pixels = __riscv_vle32_v_u32m1((uint32_t*)src_ptr, vl);
+                
+                // Use vsseg[2-8]e32 to store duplicated pixels
+                switch (scale_factor) {
+                    case 2:
+                        __riscv_vsseg2e32_v_u32m1x2((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x2(pixels, pixels), vl);
+                        break;
+                    case 3:
+                        __riscv_vsseg3e32_v_u32m1x3((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x3(pixels, pixels, pixels), vl);
+                        break;
+                    case 4:
+                        __riscv_vsseg4e32_v_u32m1x4((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x4(pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 5:
+                        __riscv_vsseg5e32_v_u32m1x5((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x5(pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 6:
+                        __riscv_vsseg6e32_v_u32m1x6((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x6(pixels, pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 7:
+                        __riscv_vsseg7e32_v_u32m1x7((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x7(pixels, pixels, pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                    case 8:
+                        __riscv_vsseg8e32_v_u32m1x8((uint32_t*)dst_ptr, __riscv_vcreate_v_u32m1x8(pixels, pixels, pixels, pixels, pixels, pixels, pixels, pixels), vl);
+                        break;
+                }
+                
+                src_ptr += vl * 4;
+                dst_ptr += vl * scale_factor * 4;
+                elements_to_process -= vl;
+            }
+        }
+    }
+}
+
+void scale_intermediate_to_framebuffer(unsigned char *intermediate, unsigned char *framebuffer, int scale_factor)
+{
+    if (fb.bits_per_pixel == 16) {
+        scale_intermediate_to_framebuffer_rgb565(intermediate, framebuffer, scale_factor);
+    } else if (fb.bits_per_pixel == 32) {
+        scale_intermediate_to_framebuffer_rgba8888(intermediate, framebuffer, scale_factor);
     }
 }
 #endif
@@ -415,22 +569,33 @@ void I_InitGraphics (void)
 
     printf("I_InitGraphics: DOOM screen size: w x h: %d x %d\n", SCREENWIDTH, SCREENHEIGHT);
 
-#ifndef USE_VECTOR
     int i = M_CheckParmWithArgs("-scaling", 1);
     if (i > 0) {
         i = atoi(myargv[i + 1]);
+#ifdef USE_VECTOR
+        // Limit scaling to 8x for vector implementation
+        if (i > 8) i = 8;
+#endif
         fb_scaling = i;
         printf("I_InitGraphics: Scaling factor: %d\n", fb_scaling);
     } else {
         fb_scaling = fb.xres / SCREENWIDTH;
         if (fb.yres / SCREENHEIGHT < fb_scaling)
             fb_scaling = fb.yres / SCREENHEIGHT;
+#ifdef USE_VECTOR
+        // Limit auto-scaling to 8x for vector implementation
+        if (fb_scaling > 8) fb_scaling = 8;
+#endif
         printf("I_InitGraphics: Auto-scaling factor: %d\n", fb_scaling);
     }
-#endif
     /* Allocate screen to draw to */
 	I_VideoBuffer = (byte*)Z_Malloc (SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);  // For DOOM to draw on
 	// I_VideoBuffer_FB = (byte*)malloc(fb.xres * fb.yres * (fb.bits_per_pixel/8));     // For a single write() syscall to fbdev
+
+#ifdef USE_VECTOR
+    // Allocate intermediate buffer for vector scaling (fixed 320x200 size in framebuffer format)
+    I_VideoBuffer_Intermediate = (byte*)malloc(SCREENWIDTH * SCREENHEIGHT * (fb.bits_per_pixel/8));
+#endif
 
     // SMD: use mmap to avoid extra copies between internal buffer and framebuffer
     I_VideoBuffer_FB = mmap(NULL, fb.xres * fb.yres * (fb.bits_per_pixel/8), PROT_WRITE, MAP_SHARED, fd_fb, 0);
@@ -444,6 +609,11 @@ void I_InitGraphics (void)
 void I_ShutdownGraphics (void)
 {
 	Z_Free (I_VideoBuffer);
+#ifdef USE_VECTOR
+	if (I_VideoBuffer_Intermediate) {
+		free(I_VideoBuffer_Intermediate);
+	}
+#endif
 	free(I_VideoBuffer_FB);
 }
 
@@ -638,7 +808,16 @@ void I_UpdateNoBlit (void)
 void I_FinishUpdate (void)
 {
 #ifdef USE_VECTOR
-    draw_screen_vector((unsigned char *) I_VideoBuffer, (unsigned char *) I_VideoBuffer_FB);
+    if (fb_scaling == 1) {
+        // Direct rendering to framebuffer for 1x scaling
+        draw_screen_vector((unsigned char *) I_VideoBuffer, (unsigned char *) I_VideoBuffer_FB);
+    } else {
+        // Two-stage rendering for scaling > 1x
+        // First render to intermediate buffer (320x200 fixed size)
+        draw_screen_vector((unsigned char *) I_VideoBuffer, (unsigned char *) I_VideoBuffer_Intermediate);
+        // Then scale from intermediate buffer to framebuffer
+        scale_intermediate_to_framebuffer((unsigned char *) I_VideoBuffer_Intermediate, (unsigned char *) I_VideoBuffer_FB, fb_scaling);
+    }
 #else
     int y;
     int x_offset, x_offset_end;
