@@ -161,7 +161,8 @@ void R_DrawColumn (void)
 
             vuint8m1_t offsets_shift_8 = __riscv_vnsrl_wx_u8m1(offset_shift, 0, vl);
 
-            vuint8m4_t source_index = __riscv_vlmul_ext_v_u8m1_u8m4(__riscv_vand_vx_u8m1(offsets_shift_8, 127, vl));
+            vuint8m1_t source_index_tmp = __riscv_vand_vx_u8m1(offsets_shift_8, 127, vl);
+            vuint8m4_t source_index = __riscv_vlmul_ext_v_u8m1_u8m4(source_index_tmp);
 
             vuint8m4_t color_index =  __riscv_vrgather_vv_u8m4(source, source_index, vl);
 
