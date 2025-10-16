@@ -162,22 +162,26 @@ void cmap_to_fb(uint8_t * out, uint8_t * in, int in_pixels)
     struct color c;
     uint32_t pix;
     uint16_t r, g, b;
-
     for (i = 0; i < in_pixels; i++)
     {
         c = colors[*in];  /* R:8 G:8 B:8 format! */
-        r = (uint16_t)(c.r >> (8 - fb.red.length));
+        b = (uint16_t)(c.r >> (8 - fb.red.length));
         g = (uint16_t)(c.g >> (8 - fb.green.length));
-        b = (uint16_t)(c.b >> (8 - fb.blue.length));
+        r = (uint16_t)(c.b >> (8 - fb.blue.length));
         pix = r << fb.red.offset;
         pix |= g << fb.green.offset;
         pix |= b << fb.blue.offset;
 
         for (k = 0; k < fb_scaling; k++) {
+            // Calculate position within current 4-pixel output group
+            int output_pixel_pos = ((i * fb_scaling + k) % 4);
+            int swizzled_pos = 3 - output_pixel_pos;
+            uint8_t *swizzled_out = out - (output_pixel_pos * (fb.bits_per_pixel/8)) + (swizzled_pos * (fb.bits_per_pixel/8));
+
             for (j = 0; j < fb.bits_per_pixel/8; j++) {
-                *out = (pix >> (j*8));
-                out++;
+                *(swizzled_out + j) = (pix >> (j*8));
             }
+            out += (fb.bits_per_pixel/8);
         }
         in++;
     }
@@ -424,30 +428,30 @@ void scale_intermediate_to_framebuffer_rgb565(unsigned char *intermediate, unsig
     int y;
     int fb_width = fb.xres;
     int fb_height = fb.yres;
-    
+
     // Calculate offsets - center X, align to top for Y (like original fbdoom)
     int x_offset = (fb_width - (SCREENWIDTH * scale_factor)) / 2;
     int y_offset = 0;
-    
+
     for (y = 0; y < SCREENHEIGHT; y++) {
         unsigned char *src_line = intermediate + y * SCREENWIDTH * 2; // 2 bytes per pixel for RGB565
-        
+
         for (int scale_y = 0; scale_y < scale_factor; scale_y++) {
             int dst_y = y_offset + y * scale_factor + scale_y;
             if (dst_y >= fb_height) break;
-            
+
             unsigned char *dst_line = framebuffer + dst_y * fb_width * 2 + x_offset * 2;
-            
+
             int elements_to_process = SCREENWIDTH;
             unsigned char *src_ptr = src_line;
             unsigned char *dst_ptr = dst_line;
-            
+
             while (elements_to_process > 0) {
                 size_t vl = __riscv_vsetvl_e16m1(elements_to_process);
-                
+
                 // Load pixels from intermediate buffer
                 vuint16m1_t pixels = __riscv_vle16_v_u16m1((uint16_t*)src_ptr, vl);
-                
+
                 // Use vsseg[2-8]e16 to store duplicated pixels
                 switch (scale_factor) {
                     case 2:
@@ -472,7 +476,7 @@ void scale_intermediate_to_framebuffer_rgb565(unsigned char *intermediate, unsig
                         __riscv_vsseg8e16_v_u16m1x8((uint16_t*)dst_ptr, __riscv_vcreate_v_u16m1x8(pixels, pixels, pixels, pixels, pixels, pixels, pixels, pixels), vl);
                         break;
                 }
-                
+
                 src_ptr += vl * 2;
                 dst_ptr += vl * scale_factor * 2;
                 elements_to_process -= vl;
@@ -509,6 +513,11 @@ void scale_intermediate_to_framebuffer_rgba8888(unsigned char *intermediate, uns
                 
                 // Load pixels from intermediate buffer
                 vuint32m1_t pixels = __riscv_vle32_v_u32m1((uint32_t*)src_ptr, vl);
+                
+                // HACK: Rotate pixels using vror.vx at sew=64 with rotate amount of 32
+                vuint64m1_t pixels_64 = __riscv_vreinterpret_v_u32m1_u64m1(pixels);
+                pixels_64 = __riscv_vror_vx_u64m1(pixels_64, 32, vl);
+                pixels = __riscv_vreinterpret_v_u64m1_u32m1(pixels_64);
                 
                 // Use vsseg[2-8]e32 to store duplicated pixels
                 switch (scale_factor) {
