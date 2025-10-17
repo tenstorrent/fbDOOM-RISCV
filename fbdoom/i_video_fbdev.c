@@ -41,6 +41,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <time.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -48,6 +50,8 @@
 #include <linux/fb.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+
+#include "i_swap.h"
 
 #ifdef USE_VECTOR
     #include "riscv_vector.h"
@@ -553,6 +557,8 @@ void scale_intermediate_to_framebuffer(unsigned char *intermediate, unsigned cha
 }
 #endif
 
+#include "tt_logo_embedded.h"
+
 void I_InitGraphics (void)
 {
     /* Open fbdev file descriptor */
@@ -811,12 +817,19 @@ void I_UpdateNoBlit (void)
 // I_FinishUpdate
 //
 
+static unsigned long ns_start;
+static unsigned long frames;
+static byte *fps_buffer = NULL;
+static int fps_buffer_width = 0;
+static int fps_buffer_height = 0;
+static boolean fps_initialized = false;
+static byte current_palette[256 * 3];
+
 void I_FinishUpdate (void)
 {
     static int	lasttic;
     int		tics;
     int		i;
-    // draws little dots on the bottom of the screen
 
     if (display_fps_dots)
     {
@@ -829,6 +842,108 @@ void I_FinishUpdate (void)
 	    I_VideoBuffer[ (SCREENHEIGHT-1)*SCREENWIDTH + i] = 0xff;
 	for ( ; i<20*4 ; i+=4)
 	    I_VideoBuffer[ (SCREENHEIGHT-1)*SCREENWIDTH + i] = 0x0;
+    }
+
+    extern boolean devparm;
+    if (devparm)
+    {
+        frames++;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        unsigned long ns = ts.tv_sec * 1000000000 + ts.tv_nsec;
+
+        #define SCALING_FACTOR 150
+        double seconds = (double)(ns-ns_start) / 1000000000.0 * SCALING_FACTOR;
+        if (seconds >= 1.0) {
+            if (!fps_initialized)
+            {
+                int buffer_width = 64;
+                int buffer_height = 16;
+                
+                fps_buffer = (byte*)malloc(buffer_width * buffer_height);
+                if (fps_buffer != NULL)
+                {
+                    fps_buffer_width = buffer_width;
+                    fps_buffer_height = buffer_height;
+                    fps_initialized = true;
+                }
+            }
+            
+            if (fps_buffer != NULL && fps_initialized)
+            {
+                static char fps_text[16];
+                extern patch_t* hu_font[];
+                
+                snprintf(fps_text, sizeof(fps_text), "FPS: %.0f", 1.0 * frames/seconds);
+                
+                memset(fps_buffer, 0, fps_buffer_width * fps_buffer_height);
+                
+                if (hu_font[0] != NULL)
+                {
+                    int x = 2;
+                    for (char *s = fps_text; *s; s++)
+                    {
+                        unsigned char c = toupper((int)*s);
+                        if (c != ' ' && c >= '!' && c <= '_')
+                        {
+                            patch_t *patch = hu_font[c - '!'];
+                            if (patch != NULL && x + SHORT(patch->width) < fps_buffer_width)
+                            {
+                                int width = SHORT(patch->width);
+                                column_t *column;
+                                
+                                for (int col = 0; col < width && (x + col) < fps_buffer_width; col++)
+                                {
+                                    int colofs_offset = 8 + col * 4;
+                                    int *colofs_ptr = (int *)((byte *)patch + colofs_offset);
+                                    int colofs = LONG(*colofs_ptr);
+                                    
+                                    if (colofs > 0 && colofs < 65536)
+                                    {
+                                        column = (column_t *)((byte *)patch + colofs);
+                                        
+                                        int safety = 0;
+                                        while (column->topdelta != 0xff && safety++ < 100)
+                                        {
+                                            byte *source = (byte *)column + 3;
+                                            int count = column->length;
+                                            int dest_y = 2 + column->topdelta;
+                                            
+                                            for (int j = 0; j < count; j++)
+                                            {
+                                                if (dest_y >= 0 && dest_y < fps_buffer_height && (x + col) < fps_buffer_width)
+                                                {
+                                                    int dst_offset = dest_y * fps_buffer_width + (x + col);
+                                                    if (dst_offset < fps_buffer_width * fps_buffer_height)
+                                                    {
+                                                        fps_buffer[dst_offset] = source[j];
+                                                    }
+                                                }
+                                                dest_y++;
+                                            }
+                                            
+                                            column = (column_t *)((byte *)column + column->length + 4);
+                                        }
+                                    }
+                                }
+                                x += width;
+                            }
+                            else
+                            {
+                                x += 4;
+                            }
+                        }
+                        else
+                        {
+                            x += 4;
+                        }
+                    }
+                }
+            }
+            
+            ns_start = ns;
+            frames = 0;
+        }
     }
 
 #ifdef USE_VECTOR
@@ -881,6 +996,135 @@ void I_FinishUpdate (void)
         line_in += SCREENWIDTH;
     }
 #endif
+
+    if (devparm && fps_buffer != NULL && fps_initialized)
+        {
+            int fb_y_start = SCREENHEIGHT * fb_scaling;
+            int fb_x_offset = (fb.xres - (SCREENWIDTH * fb_scaling)) / 2;
+            int fb_x_start = fb_x_offset;
+            
+            if (fb_y_start >= fb.yres || fb_y_start < 0)
+            {
+                goto skip_fps_render;
+            }
+            
+            if (fps_buffer_width <= 0 || fps_buffer_height <= 0)
+            {
+                goto skip_fps_render;
+            }
+            
+            for (int row = 0; row < fps_buffer_height; row++)
+            {
+                unsigned char *src_line = fps_buffer + row * fps_buffer_width;
+                
+                for (int scale_y = 0; scale_y < fb_scaling; scale_y++)
+                {
+                    int fb_y = fb_y_start + row * fb_scaling + scale_y;
+                    if (fb_y >= fb.yres) goto skip_fps_render;
+                    
+                    int scaled_width = fps_buffer_width * fb_scaling;
+                    if (fb_x_start + scaled_width > fb.xres)
+                        goto skip_fps_render;
+                
+                    if (fb.bits_per_pixel == 16)
+                    {
+                        uint16_t *fb_line = (uint16_t *)((unsigned char *)I_VideoBuffer_FB + fb_y * fb.xres * 2) + fb_x_start;
+                        for (int col = 0; col < fps_buffer_width; col++)
+                        {
+                            uint8_t palette_idx = src_line[col];
+                            uint16_t pixel;
+                            
+                            if (palette_idx == 0)
+                            {
+                                pixel = 0x0000;
+                            }
+                            else
+                            {
+                                byte *rgb = current_palette + palette_idx * 3;
+                                uint8_t r = rgb[0];
+                                uint8_t g = rgb[1];
+                                uint8_t b = rgb[2];
+                                pixel = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+                            }
+                            
+                            for (int scale_x = 0; scale_x < fb_scaling; scale_x++)
+                            {
+                                fb_line[col * fb_scaling + scale_x] = pixel;
+                            }
+                        }
+                    }
+                    else if (fb.bits_per_pixel == 32)
+                    {
+                        uint32_t *fb_line = (uint32_t *)((unsigned char *)I_VideoBuffer_FB + fb_y * fb.xres * 4) + fb_x_start;
+                        for (int col = 0; col < fps_buffer_width; col++)
+                        {
+                            uint8_t palette_idx = src_line[col];
+                            uint32_t pixel;
+                            
+                            if (palette_idx == 0)
+                            {
+                                pixel = 0x00000000;
+                            }
+                            else
+                            {
+                                byte *rgb = current_palette + palette_idx * 3;
+                                uint8_t r = rgb[0];
+                                uint8_t g = rgb[1];
+                                uint8_t b = rgb[2];
+                                pixel = (r << 16) | (g << 8) | b;
+                            }
+                            
+                            for (int scale_x = 0; scale_x < fb_scaling; scale_x++)
+                            {
+                                fb_line[col * fb_scaling + scale_x] = pixel;
+                            }
+                        }
+                    }
+                }
+            }
+skip_fps_render:
+        ;
+    }
+
+    int bottom_bar_height = 200;
+    int logo_fb_y_start = fb.yres - bottom_bar_height + (bottom_bar_height - LOGO_HEIGHT) / 2;
+    int logo_fb_x_start = (fb.xres - LOGO_WIDTH) / 2;
+    
+    if (logo_fb_y_start >= 0 && logo_fb_x_start >= 0)
+    {
+        for (int row = 0; row < LOGO_HEIGHT; row++)
+        {
+            int fb_y = logo_fb_y_start + row;
+            if (fb_y >= fb.yres) break;
+            
+            const unsigned char *src_line = logo_data + row * LOGO_WIDTH;
+            
+            if (fb.bits_per_pixel == 16)
+            {
+                uint16_t *fb_line = (uint16_t *)((unsigned char *)I_VideoBuffer_FB + fb_y * fb.xres * 2) + logo_fb_x_start;
+                for (int col = 0; col < LOGO_WIDTH; col++)
+                {
+                    uint8_t val = src_line[col];
+                    if (val > 128)
+                    {
+                        fb_line[col] = 0xFFFF;
+                    }
+                }
+            }
+            else if (fb.bits_per_pixel == 32)
+            {
+                uint32_t *fb_line = (uint32_t *)((unsigned char *)I_VideoBuffer_FB + fb_y * fb.xres * 4) + logo_fb_x_start;
+                for (int col = 0; col < LOGO_WIDTH; col++)
+                {
+                    uint8_t val = src_line[col];
+                    if (val > 128)
+                    {
+                        fb_line[col] = 0x00FFFFFF;
+                    }
+                }
+            }
+        }
+    }
 }
 
 //
@@ -901,6 +1145,8 @@ void I_ReadScreen (byte* scr)
 
 void I_SetPalette (byte* palette)
 {
+    memcpy(current_palette, palette, 256 * 3);
+    
     //col_t* c;
 
     //for (i = 0; i < 256; i++)
